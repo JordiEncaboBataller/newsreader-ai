@@ -1,0 +1,22 @@
+# Environment variables
+.env
+_env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+venv/
+env/
+.venv/
+
+# Model weights (hosted on Hugging Face Hub, too big for GitHub)
+ModelsBias/
+ModelsFake/
+
+# OS / editor junk
+.DS_Store
+.vscode/
+.idea/
+__MACOSX/
