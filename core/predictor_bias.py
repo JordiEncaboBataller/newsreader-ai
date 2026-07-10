@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 import re
 import contractions
-from chunking_utils import predict_chunks_batched
+from core.chunking_utils import predict_chunks_batched
 
 
 def clean_text(text):

@@ -1,20 +1,20 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import requests
-from auto_scraper import AutoScraper
+from core.auto_scraper import AutoScraper
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 import joblib
-from predictor_bias import BIAS
-from predictor_fake import FAKE
-from mistral_sm import EXPLAIN, SUMMARY, TRANSLATE
-from figuras import FigBarras, FigTarta
+from core.predictor_bias import BIAS
+from core.predictor_fake import FAKE
+from core.mistral_sm import EXPLAIN, SUMMARY, TRANSLATE
+from core.figuras import FigBarras, FigTarta
 import time
 import html
 import base64
 import logging
 from urllib.parse import urlparse
 from langdetect import detect, DetectorFactory, LangDetectException
-from chunking_utils import MAX_CHUNKS
+from core.chunking_utils import MAX_CHUNKS
 import concurrent.futures  # Requerido para el control de timeout de la llamada al LLM y la paralelización BIAS/FAKE
 
 # Configuración centralizada de logging: todos los módulos (auto_scraper,
@@ -249,7 +249,7 @@ LLM_SECTION_COLORS = {
 }
 
 
-logo_path = "./Imags/LogoOscuro.png"
+logo_path = "./assets/logo_oscuro.png"
 with open(logo_path, "rb") as f:
     img_bytes = f.read()
     encoded_logo = base64.b64encode(img_bytes).decode()

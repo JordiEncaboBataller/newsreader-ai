@@ -13,6 +13,7 @@ Transformer locales + la API de Mistral.
 - [Modelos (`ModelsBias` / `ModelsFake`)](#modelos-modelsbias--modelsfake)
 - [Ejecutar la aplicación](#ejecutar-la-aplicación)
 - [Estructura del proyecto](#estructura-del-proyecto)
+- [Qué subir a GitHub y qué no](#qué-subir-a-github-y-qué-no)
 - [Limitaciones conocidas](#limitaciones-conocidas)
 
 ---
@@ -91,6 +92,11 @@ ModelsFake/
 └── vocab.txt
 ```
 
+> `ModelsFake` en Hugging Face también contiene `pytorch_model.bin`: es un
+> duplicado del mismo modelo en formato antiguo que el código nunca usa. No
+> hace falta descargarlo ni afecta si lo tienes, pero puedes eliminarlo del
+> repo de Hugging Face para aligerarlo.
+
 ## Ejecutar la aplicación
 
 ```bash
@@ -105,27 +111,46 @@ de un túnel de ngrok (requiere `NGROK_AUTH_TOKEN` en tu `.env`).
 ## Estructura del proyecto
 
 ```
-App/                              ← raíz del repositorio (inicializa git aquí)
-├── Imags/
-│   ├── LogoClaro.png
-│   └── LogoOscuro.png            ← el único que usa app.py actualmente
-├── ModelsBias/                   ← NO se sube (ver sección Modelos)
-├── ModelsFake/                   ← NO se sube (ver sección Modelos)
-├── Notebooks Ejemplos/           ← opcional, no necesario para ejecutar la app
-├── .env                          ← NO se sube (tus claves reales)
+newsreader-ai/                    ← raíz del repositorio (inicializa git aquí)
+├── core/                         # Paquete con la lógica de negocio
+│   ├── __init__.py
+│   ├── auto_scraper.py            # Extracción de texto del artículo (requests + Selenium de respaldo)
+│   ├── chunking_utils.py           # División y batching de texto largo en bloques de tokens
+│   ├── figuras.py                   # Gráficos Plotly (barras y tarta) de las probabilidades
+│   ├── mistral_sm.py                 # Prompts y llamadas a la API de Mistral (resumen, traducción, interpretación)
+│   ├── predictor_bias.py              # Inferencia del modelo de sesgo político
+│   └── predictor_fake.py               # Inferencia del modelo de fake news
+├── assets/
+│   └── logo_oscuro.png            # Logo usado en la cabecera de la app
+├── ModelsBias/                    ← NO se sube (ver sección Modelos)
+├── ModelsFake/                    ← NO se sube (ver sección Modelos)
+├── .env                           ← NO se sube (tus claves reales)
 ├── .gitignore
-├── app.py                        # Interfaz Streamlit y orquestación del pipeline
-├── auto_scraper.py                # Extracción de texto del artículo (requests + Selenium de respaldo)
-├── chunking_utils.py               # División y batching de texto largo en bloques de tokens
+├── app.py                         # Interfaz Streamlit y orquestación del pipeline
 ├── env.example
-├── figuras.py                      # Gráficos Plotly (barras y tarta) de las probabilidades
-├── mistral_sm.py                    # Prompts y llamadas a la API de Mistral (resumen, traducción, interpretación)
-├── predictor_bias.py                 # Inferencia del modelo de sesgo político
-├── predictor_fake.py                  # Inferencia del modelo de fake news
+├── LICENSE
 ├── README.md
 ├── requirements.txt
-└── start.ipynb                        # Lanzador opcional vía ngrok
+└── start.ipynb                    # Lanzador opcional vía ngrok
 ```
+
+## Qué subir a GitHub y qué no
+
+| Elemento | ¿Se sube? | Motivo |
+|---|---|---|
+| `app.py` | ✅ Sí | Punto de entrada de la app |
+| `core/` (los 6 módulos + `__init__.py`) | ✅ Sí | Código fuente de la lógica de negocio |
+| `requirements.txt` | ✅ Sí | Necesario para instalar dependencias |
+| `env.example` | ✅ Sí | Plantilla sin claves reales |
+| `.gitignore` | ✅ Sí | Necesario para que el resto de reglas funcionen |
+| `README.md` | ✅ Sí | Documentación |
+| `LICENSE` | ✅ Sí | Licencia del proyecto |
+| `assets/logo_oscuro.png` | ✅ Sí | Pesa poco, y `app.py` lo necesita para arrancar (falla con `FileNotFoundError` si no está) |
+| `start.ipynb` | ✅ Sí (opcional) | Solo si quieres mantener el lanzador por ngrok |
+| `.env` | ❌ No | Contiene tus claves reales — ya está en `.gitignore` |
+| `ModelsBias/`, `ModelsFake/` | ❌ No | Demasiado grandes para GitHub — alojados en Hugging Face, ya en `.gitignore` |
+| `__pycache__/`, `.ipynb_checkpoints/` | ❌ No | Archivos generados automáticamente por Python/Jupyter |
+| `__MACOSX/` | ❌ No | Artefacto de descomprimir un `.zip` en macOS, ajeno al proyecto — bórralo, ni siquiera hace falta que esté en el `.gitignore` si lo borras a mano |
 
 ## Limitaciones conocidas
 

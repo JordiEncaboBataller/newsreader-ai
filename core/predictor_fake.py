@@ -1,5 +1,5 @@
 import torch
-from chunking_utils import predict_chunks_batched
+from core.chunking_utils import predict_chunks_batched
 
 
 def FAKE(text, tokenizer, model, max_len=512):
