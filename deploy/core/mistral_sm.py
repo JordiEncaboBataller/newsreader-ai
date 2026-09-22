@@ -1,22 +1,43 @@
 import os
 import json
 import re
+import time
 import logging
 from dotenv import load_dotenv
-from mistralai import Mistral
+from groq import Groq
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = 'mistral-large-latest'
+# Migrado de Mistral a Groq: el tier gratuito de Mistral resultó ser
+# demasiado restrictivo en la práctica (403 tier_not_allowed en modelos
+# grandes, 429 persistente incluso en modelos pequeños tras pocas
+# peticiones). Groq ofrece un tier gratuito sin tarjeta de crédito con
+# límites mucho más generosos (30 peticiones/min, 1.000/día con este
+# modelo) y una API compatible con el mismo patrón de código.
+MODEL_NAME = 'openai/gpt-oss-120b'
+
+# Reintentos ante un 429 (límite de peticiones agotado). Un 429 aislado no
+# significa que la petición sea inválida, solo que hay que esperar un poco
+# antes de volver a intentarlo.
+MAX_RETRIES = 3
+RETRY_BASE_DELAY_SECONDS = 4
+
+
+def _is_rate_limit_error(e):
+    """Detecta si la excepción corresponde a un 429 / rate_limited de la API,
+    inspeccionando el mensaje de error (la SDK no siempre expone un
+    atributo status_code fiable en todas las versiones)."""
+    text = str(e)
+    return "429" in text or "rate_limited" in text or "Rate limit" in text
 
 
 def _get_client():
-    api_key = os.getenv("MISTRAL_API_KEY")
+    api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        raise ValueError("MISTRAL_API_KEY not found. Check your .env file.")
-    return Mistral(api_key=api_key)
+        raise ValueError("GROQ_API_KEY not found. Check your .env file.")
+    return Groq(api_key=api_key)
 
 
 def prompt_1(text, result1, result2):
@@ -93,39 +114,67 @@ def prompt_3(text):
 
 
 def call_mistral_json(prompt, role):
-    """Calls Mistral and returns a parsed Python dict (JSON mode)."""
+    """Calls the LLM (Groq) and returns a parsed Python dict (JSON mode).
+    Reintenta automáticamente si la API responde con un 429 (rate limit del
+    tier gratuito), esperando un poco más en cada intento."""
     client = _get_client()
-    response = client.chat.complete(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": role},
-            {"role": "user", "content": prompt}
-        ],
-        response_format={"type": "json_object"},
-        # temperature=0 minimiza (aunque no garantiza al 100%) la
-        # variabilidad de la respuesta entre llamadas idénticas.
-        temperature=0
-    )
-    raw = response.choices[0].message.content
-    # Strip markdown fences if the model wraps the JSON anyway
-    cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    return json.loads(cleaned)
+
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": role},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"},
+                # temperature=0 minimiza (aunque no garantiza al 100%) la
+                # variabilidad de la respuesta entre llamadas idénticas.
+                temperature=0
+            )
+            raw = response.choices[0].message.content
+            # Strip markdown fences if the model wraps the JSON anyway
+            cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            return json.loads(cleaned)
+        except Exception as e:
+            last_error = e
+            if _is_rate_limit_error(e) and attempt < MAX_RETRIES:
+                wait = RETRY_BASE_DELAY_SECONDS * attempt
+                logger.warning(f"Rate limit alcanzado (intento {attempt}/{MAX_RETRIES}), reintentando en {wait}s...")
+                time.sleep(wait)
+                continue
+            raise last_error
 
 
 def call_mistral_text(prompt, role):
-    """Calls Mistral and returns plain text."""
+    """Calls the LLM (Groq) and returns plain text.
+    Reintenta automáticamente si la API responde con un 429 (rate limit del
+    tier gratuito), esperando un poco más en cada intento."""
     client = _get_client()
-    response = client.chat.complete(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": role},
-            {"role": "user", "content": prompt}
-        ],
-        # temperature=0 minimiza (aunque no garantiza al 100%) la
-        # variabilidad de la respuesta entre llamadas idénticas.
-        temperature=0
-    )
-    return response.choices[0].message.content
+
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": role},
+                    {"role": "user", "content": prompt}
+                ],
+                # temperature=0 minimiza (aunque no garantiza al 100%) la
+                # variabilidad de la respuesta entre llamadas idénticas.
+                temperature=0
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            last_error = e
+            if _is_rate_limit_error(e) and attempt < MAX_RETRIES:
+                wait = RETRY_BASE_DELAY_SECONDS * attempt
+                logger.warning(f"Rate limit alcanzado (intento {attempt}/{MAX_RETRIES}), reintentando en {wait}s...")
+                time.sleep(wait)
+                continue
+            raise last_error
 
 
 def EXPLAIN(text, result1, result2):
