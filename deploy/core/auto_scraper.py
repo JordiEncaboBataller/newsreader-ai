@@ -1,3 +1,11 @@
+"""Article scraping utilities.
+
+Fetches the raw HTML of a news article URL and extracts its main text.
+Uses a two-tier strategy: a fast plain HTTP request first, falling back to
+a headless Chrome browser (via undetected-chromedriver) only when the
+simple request is blocked, e.g. by anti-bot protection.
+"""
+
 import requests
 import logging
 import undetected_chromedriver as uc
@@ -9,8 +17,8 @@ import time
 
 logger = logging.getLogger(__name__)
 
-# Cabecera realista para reducir el bloqueo de simple_try() por parte de
-# sitios con protección anti-bot (El País, The Hill, etc.)
+# Realistic browser header to reduce simple_try() being blocked by sites
+# with anti-bot protection (El País, The Hill, etc.).
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -21,18 +29,21 @@ HEADERS = {
 
 
 def get_driver():
+    """Creates and configures an undetected-chromedriver Chrome instance
+    for headless scraping, hardened against crashes and bot detection."""
     options = uc.ChromeOptions()
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-popup-blocking")
-    
-    # Flags de robustez para evitar crashes en servidores Linux/entornos VPS
+
+    # Robustness flags to avoid crashes on Linux servers / VPS environments.
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    
-    # Refuerza el disfraz anti-detección (además del que ya aplica uc por
-    # defecto) para reducir el bloqueo por parte de sistemas anti-bot como
-    # PerimeterX/Datadome/Cloudflare, que suelen usar El País o The Hill.
+
+    # Reinforces anti-detection (on top of what undetected-chromedriver
+    # already applies by default) to reduce blocking by anti-bot systems
+    # such as PerimeterX/Datadome/Cloudflare, commonly used by El País or
+    # The Hill.
     options.add_argument("--disable-blink-features=AutomationControlled")
 
     prefs = {
@@ -42,21 +53,23 @@ def get_driver():
     }
     options.add_experimental_option("prefs", prefs)
 
-    # IMPORTANTE: el modo headless de undetected_chromedriver debe activarse
-    # con el parámetro headless=True del constructor, NO con
-    # options.add_argument("--headless=..."). uc necesita aplicar sus propios
-    # parches internos (userAgent, navigator.webdriver, etc.) para que el
-    # modo headless siga pareciendo un navegador normal; si se fuerza el
-    # flag manualmente, en Windows puede seguir abriendo una ventana visible
-    # Y además delatar que es un bot, provocando que sitios con protección
-    # anti-bot bloqueen el contenido.
+    # IMPORTANT: undetected-chromedriver's headless mode must be enabled via
+    # the constructor's headless=True argument, NOT via
+    # options.add_argument("--headless=..."). uc needs to apply its own
+    # internal patches (userAgent, navigator.webdriver, etc.) for headless
+    # mode to still look like a normal browser; forcing the flag manually
+    # can leave a visible window open on Windows AND reveal that it's a
+    # bot, causing anti-bot-protected sites to block the content.
     driver = uc.Chrome(options=options, headless=True)
-    
-    # Evita que el driver se quede colgado indefinidamente esperando la respuesta de un servidor lento
+
+    # Prevents the driver from hanging indefinitely on a slow server response.
     driver.set_page_load_timeout(25)
     return driver
 
+
 def simple_try(url):
+    """Attempts a plain HTTP GET request. Returns the raw HTML on success
+    (status 200), or None if the request fails or is blocked."""
     try:
         response = requests.get(url, headers=HEADERS, timeout=8)
         if response.status_code == 200:
@@ -65,17 +78,21 @@ def simple_try(url):
         logger.warning(f"Request failed: {e}")
     return None
 
+
 def driver_try(url):
+    """Fallback strategy: loads the page in a headless Chrome browser and
+    returns the rendered HTML. Used when simple_try() is blocked. Always
+    closes the browser process, even on failure, to avoid memory leaks."""
     driver = None
     try:
         driver = get_driver()
         driver.get(url)
-        
+
         wait = WebDriverWait(driver, 20)
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        
-        # Pequeña espera adicional: algunos sistemas anti-bot muestran un
-        # "challenge" JS de unos segundos antes de servir el contenido real.
+
+        # Small extra wait: some anti-bot systems show a JS "challenge"
+        # for a few seconds before serving the real content.
         time.sleep(2)
         page_source = driver.page_source
         return page_source
@@ -83,15 +100,25 @@ def driver_try(url):
         logger.warning(f"Driver failed: {e}")
         return None
     finally:
-        # Garantía absoluta de cierre del proceso de Chrome para evitar fugas de memoria (RAM leak)
+        # Absolute guarantee that the Chrome process is closed, to avoid RAM leaks.
         if driver is not None:
             try:
                 driver.quit()
-                logger.info("Driver cerrado de manera segura.")
+                logger.info("Driver closed safely.")
             except Exception as ce:
-                logger.error(f"Error crítico al intentar cerrar el driver: {ce}")
+                logger.error(f"Critical error while closing the driver: {ce}")
+
 
 def AutoScraper(url):
+    """Extracts the main article text from a URL.
+
+    Tries a plain HTTP request first; if that fails, falls back to a
+    headless browser. The resulting HTML (from either method) is then
+    cleaned with trafilatura to strip navigation, ads and boilerplate,
+    leaving only the article body.
+
+    Returns the extracted text, or None if every step fails.
+    """
     html = simple_try(url)
     logger.info(f"simple_try -> {len(html) if html else 0} chars")
 
@@ -108,5 +135,5 @@ def AutoScraper(url):
             logger.error(f"trafilatura error: {e}")
             return None
 
-    logger.error("No se pudo obtener el texto del artículo (todos los métodos de scraping fallaron).")
+    logger.error("Could not retrieve the article text (all scraping methods failed).")
     return None

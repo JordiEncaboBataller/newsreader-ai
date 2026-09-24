@@ -1,32 +1,37 @@
+"""Shared text-chunking and batched-inference utilities for the BIAS and
+FAKE classifiers, both of which use the same BERT-style tokenizer/model
+pattern and need to split long articles into model-sized chunks."""
+
 import torch
 
-# Límite de bloques a analizar por artículo. Evita tiempos de espera
-# desproporcionados si el scraper arrastra texto de más (menús, footers...).
-# 8 bloques de ~510 tokens cubren sobradamente la longitud de un artículo
-# de noticias normal (varios miles de palabras).
+# Max number of chunks analyzed per article. Prevents disproportionate
+# wait times if the scraper pulls in extra text (menus, footers...).
+# 8 chunks of ~510 tokens comfortably cover the length of a typical news
+# article (several thousand words).
 MAX_CHUNKS = 8
 
 
 def predict_chunks_batched(text, tokenizer, model, max_len=512, max_chunks=MAX_CHUNKS):
-    """Divide el texto en bloques de hasta max_len tokens (dejando hueco para
-    CLS/SEP) y predice TODOS los bloques en una única pasada por el modelo
-    (batch), en vez de uno a uno en un bucle secuencial.
+    """Splits the text into chunks of up to max_len tokens (leaving room for
+    the CLS/SEP special tokens) and predicts ALL chunks in a single forward
+    pass through the model (batched), instead of one at a time in a
+    sequential loop.
 
-    Antes se hacía una llamada al modelo POR CADA bloque
-    (`for chunk in chunks: modelo(chunk)`), lo que multiplicaba el tiempo de
-    inferencia por el número de bloques. Agrupando todos los bloques en un
-    único tensor, el modelo los procesa en una sola pasada, aprovechando
-    mucho mejor el paralelismo de PyTorch/BLAS y reduciendo notablemente el
-    tiempo total — especialmente en artículos largos con varios bloques.
+    Previously, the model was called ONCE PER CHUNK
+    (`for chunk in chunks: model(chunk)`), which multiplied inference time
+    by the number of chunks. By stacking all chunks into a single tensor,
+    the model processes them in one pass, taking much better advantage of
+    PyTorch/BLAS parallelism and noticeably reducing total time —
+    especially for long articles with several chunks.
 
-    Devuelve una lista de tensores de logits, uno por bloque (cada uno de
-    forma (1, num_clases)), para mantener compatibilidad con el promediado
-    posterior (torch.stack + torch.mean) que ya usan BIAS() y FAKE().
+    Returns a list of logit tensors, one per chunk (each of shape
+    (1, num_classes)), to stay compatible with the averaging step
+    (torch.stack + torch.mean) already used by BIAS() and FAKE().
     """
     encoded = tokenizer(text, add_special_tokens=False, truncation=False)
     input_ids = encoded["input_ids"]
 
-    step = max_len - 2  # hueco para los tokens especiales CLS y SEP
+    step = max_len - 2  # room for the special CLS and SEP tokens
 
     if len(input_ids) == 0:
         token_chunks = [[]]
@@ -42,8 +47,8 @@ def predict_chunks_batched(text, tokenizer, model, max_len=512, max_chunks=MAX_C
     sequences = [[cls_id] + chunk + [sep_id] for chunk in token_chunks]
     max_chunk_len = max(len(seq) for seq in sequences)
 
-    # Padding manual para poder meter todos los bloques en un único tensor
-    # batch, aunque el último bloque sea más corto que el resto.
+    # Manual padding so every chunk can be stacked into a single batch
+    # tensor, even if the last chunk is shorter than the rest.
     input_ids_batch = []
     attention_mask_batch = []
     for seq in sequences:
@@ -56,6 +61,6 @@ def predict_chunks_batched(text, tokenizer, model, max_len=512, max_chunks=MAX_C
 
     with torch.no_grad():
         outputs = model(input_ids=input_ids_tensor, attention_mask=attention_mask_tensor)
-        logits = outputs.logits  # forma: (num_bloques, num_clases)
+        logits = outputs.logits  # shape: (num_chunks, num_classes)
 
     return [logits[i:i + 1] for i in range(logits.shape[0])]

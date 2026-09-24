@@ -6,7 +6,7 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 import joblib
 from core.predictor_bias import BIAS
 from core.predictor_fake import FAKE
-from core.mistral_sm import EXPLAIN, SUMMARY, TRANSLATE
+from core.groq import EXPLAIN, SUMMARY, TRANSLATE
 from core.figuras import FigBarras, FigTarta
 import time
 import html
@@ -15,31 +15,31 @@ import logging
 from urllib.parse import urlparse
 from langdetect import detect, DetectorFactory, LangDetectException
 from core.chunking_utils import MAX_CHUNKS
-import concurrent.futures  # Requerido para el control de timeout de la llamada al LLM y la paralelización BIAS/FAKE
+import concurrent.futures  # Needed for LLM call timeout control and BIAS/FAKE parallelization
 
-# Configuración centralizada de logging: todos los módulos (auto_scraper,
-# mistral_sm, etc.) usan logging.getLogger(__name__) y heredan esta
-# configuración automáticamente. Antes se usaba print(), que no permite
-# distinguir niveles de gravedad ni queda registrado con marca de tiempo.
+# Centralized logging configuration: every module (auto_scraper, groq,
+# etc.) uses logging.getLogger(__name__) and automatically inherits this
+# configuration. Previously print() was used, which doesn't distinguish
+# severity levels or include timestamps.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# Resultados deterministas en cada ejecución
+# Deterministic results on every run
 DetectorFactory.seed = 0
 
-# Límite máximo de caracteres de texto para enviar al módulo de interpretación del LLM
+# Max character limit for text sent to the LLM interpretation module
 MAX_TEXT_CHARS_LLM = 15000
 
 st.set_page_config(page_title="NewsReaderAI", layout="wide")
 
 # ─────────────────────────────────────────────────────────────────────────
 # DESIGN SYSTEM
-# Sistema de diseño centralizado: tipografía (Inter), paleta oscura premium
-# y tokens de radio/sombra reutilizados en todas las tarjetas de la app.
-# No cambia ninguna posición ni componente, solo su apariencia.
+# Centralized design system: typography (Inter), premium dark palette, and
+# radius/shadow tokens reused across all result cards in the app.
+# Doesn't change any layout or component, only its appearance.
 # ─────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -86,7 +86,7 @@ html, body, [class*="css"]  {
     background: var(--bg);
 }
 
-/* Botón principal (ANALYZE) */
+/* Main button (ANALYZE) */
 div.stButton > button:first-child {
     background: linear-gradient(135deg, var(--accent), var(--accent-strong));
     color: #ffffff;
@@ -107,7 +107,7 @@ div.stButton > button:first-child:active {
     transform: translateY(0px);
 }
 
-/* Input de URL */
+/* URL input */
 div[data-testid="stTextInput"] input {
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -179,12 +179,12 @@ div[data-testid="stSpinner"] > div {
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Helpers de UI: labels de sección y tarjetas de predicción reutilizables.
-# Mantienen la misma posición/orden que antes, solo cambia el marcado HTML.
+# UI helpers: reusable section labels and prediction cards.
+# Keep the same position/order as before, only the HTML markup changes.
 # ─────────────────────────────────────────────────────────────────────────
 
 def section_label(texto):
-    """Eyebrow label con barra de acento, sustituye a los <h3> grandes."""
+    """Eyebrow label with an accent bar, replaces the large <h3> headers."""
     st.markdown(
         f"""
         <div style="display:flex;align-items:center;gap:10px;margin:0 0 18px 0;">
@@ -197,7 +197,7 @@ def section_label(texto):
     )
 
 
-# Paletas sutiles (evitando rojo/verde puro) para las predicciones.
+# Subtle palettes (avoiding pure red/green) for the predictions.
 BIAS_COLORS = {
     "left":           ("#5b8cff", "var(--accent-soft)"),
     "leaning-left":   ("#38bdf8", "var(--sky-soft)"),
@@ -212,6 +212,8 @@ FAKE_COLORS = {
 
 
 def render_prediction_card(pred_label, color_map, duration, chunk_note):
+    """Renders a result card showing the predicted label, execution time,
+    and a note on how many chunks the article was analyzed in."""
     color, bg = color_map.get(pred_label, ("#5b8cff", "var(--accent-soft)"))
     label_display = pred_label.replace("-", " ").title()
     st.markdown(
@@ -241,7 +243,7 @@ def render_prediction_card(pred_label, color_map, duration, chunk_note):
     )
 
 
-# Colores de acento para cada bloque de la interpretación LLM
+# Accent colors for each block of the LLM interpretation
 LLM_SECTION_COLORS = {
     "interpretation": "#5b8cff",
     "justification": "#d99a3d",
@@ -308,6 +310,9 @@ st.markdown(f"""
 
 @st.cache_resource
 def load_models():
+    """Loads and caches the bias and fake-news classifier models, their
+    tokenizers, and the bias label encoder, so they're only loaded once
+    per session rather than on every prediction."""
     dir1 = "./ModelsBias"
     model_bias = AutoModelForSequenceClassification.from_pretrained(dir1)
     tokenizer_bias = AutoTokenizer.from_pretrained(dir1)
@@ -321,12 +326,11 @@ def load_models():
                 use_safetensors=True
             )
 
-    # IMPORTANTE: por defecto un modelo de PyTorch queda en modo train()
-    # tras cargarlo, lo que mantiene el dropout activo durante la
-    # inferencia (torch.no_grad() solo desactiva el cálculo de gradientes,
-    # NO el dropout). Sin esto, el mismo artículo puede dar probabilidades
-    # ligeramente distintas cada vez que se analiza. .eval() lo desactiva
-    # y hace que las predicciones sean deterministas.
+    # IMPORTANT: by default a PyTorch model stays in train() mode after
+    # loading, which keeps dropout active during inference (torch.no_grad()
+    # only disables gradient computation, NOT dropout). Without this, the
+    # same article could yield slightly different probabilities on every
+    # analysis. .eval() disables it, making predictions deterministic.
     model_bias.eval()
     model_fake.eval()
 
@@ -348,10 +352,10 @@ st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
 
 
 if analizar and url:
-    # Validación de formato antes de lanzar ninguna petición de red. Sin
-    # esto, una URL mal escrita (sin esquema, con espacios, etc.) producía
-    # errores confusos más adelante en requests.head() o en el scraper,
-    # sin que el usuario supiera que el problema era simplemente la URL.
+    # Format validation before firing off any network request. Without
+    # this, a malformed URL (missing scheme, spaces, etc.) produced
+    # confusing errors later in requests.head() or the scraper, without
+    # the user knowing the problem was simply the URL.
     url = url.strip()
     parsed_url = urlparse(url)
     if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
@@ -390,7 +394,7 @@ if analizar and url:
                 texto_completo = AutoScraper(url)
                 resumen = SUMMARY(texto_completo)
             except Exception as e:
-                logger.error(f"Error al extraer o resumir el artículo: {e}")
+                logger.error(f"Error extracting or summarizing the article: {e}")
                 resumen = None
 
         if not texto_completo:
@@ -429,11 +433,11 @@ if analizar and url:
         else:
             st.warning("⚠️ Error retrieving the content — the source may require a subscription.")
 
-    # Detección de idioma y traducción dinámica (mejora #4)
-    # Los modelos BERT de bias/fake news están entrenados en inglés, así que
-    # si el artículo no está en inglés lo traducimos antes de clasificarlo.
-    # El texto original se sigue usando para el resumen y la interpretación
-    # con Mistral, que funciona bien en varios idiomas.
+    # Language detection and dynamic translation.
+    # The BERT bias/fake-news models are trained in English, so if the
+    # article isn't in English we translate it before classifying it.
+    # The original text is still used for the Groq-powered summary and
+    # interpretation, which works well across languages.
     texto_para_modelos = texto_completo
     idioma_detectado = None
     try:
@@ -442,12 +446,12 @@ if analizar and url:
         idioma_detectado = None
 
     if idioma_detectado and idioma_detectado != 'en':
-        # Solo traducimos hasta el presupuesto de tokens que realmente se va
-        # a clasificar (MAX_CHUNKS bloques de ~510 tokens). Traducir el
-        # artículo entero cuando BIAS()/FAKE() solo van a usar los primeros
-        # bloques desperdicia tiempo y coste de API sin aportar nada al
-        # resultado. Se usa un margen amplio de caracteres por token para
-        # no arriesgarse a cortar contenido que sí se llegaría a analizar.
+        # Only translate up to the token budget that will actually be
+        # classified (MAX_CHUNKS chunks of ~510 tokens each). Translating
+        # the entire article when BIAS()/FAKE() will only use the first
+        # chunks wastes time and API cost without improving the result. A
+        # generous characters-per-token margin is used to avoid the risk
+        # of cutting off content that would actually be analyzed.
         CHARS_POR_TOKEN_MARGEN = 6
         max_chars_traduccion = MAX_CHUNKS * 510 * CHARS_POR_TOKEN_MARGEN
         texto_para_traducir = texto_completo[:max_chars_traduccion]
@@ -464,14 +468,13 @@ if analizar and url:
 
     with st.spinner("Making predictions..."):
 
-        # BIAS y FAKE son dos modelos completamente independientes entre sí
-        # (ninguno necesita el resultado del otro), así que en vez de
-        # ejecutarlos uno detrás de otro (duration1 + duration2 segundos en
-        # total), se lanzan a la vez en dos hilos. PyTorch libera el GIL
-        # durante el cómputo pesado de la pasada hacia delante (forward
-        # pass), así que ambos hilos pueden progresar realmente en
-        # paralelo en máquinas con varios núcleos — el tiempo total pasa a
-        # depender del más lento de los dos, no de la suma de ambos.
+        # BIAS and FAKE are two fully independent models (neither needs
+        # the other's result), so instead of running them one after the
+        # other (duration1 + duration2 seconds total), they're launched
+        # concurrently in two threads. PyTorch releases the GIL during
+        # the heavy forward-pass computation, so both threads can make
+        # real progress in parallel on multi-core machines — total time
+        # ends up depending on the slower of the two, not their sum.
         start_parallel = time.time()
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             future_bias = executor.submit(BIAS, texto_para_modelos, tokenizer_bias, model_bias, le)
@@ -480,20 +483,20 @@ if analizar and url:
             try:
                 results1 = future_bias.result()
             except Exception as e:
-                logger.error(f"Error en la predicción de sesgo (BIAS): {e}")
+                logger.error(f"Error in bias prediction (BIAS): {e}")
                 results1 = None
 
             try:
                 results2 = future_fake.result()
             except Exception as e:
-                logger.error(f"Error en la predicción de fake news (FAKE): {e}")
+                logger.error(f"Error in fake-news prediction (FAKE): {e}")
                 results2 = None
 
         duration_parallel = time.time() - start_parallel
-        # Al ejecutarse en paralelo, ambos comparten aproximadamente el
-        # mismo tiempo de pared (wall-clock); se muestra el mismo valor en
-        # las dos tarjetas de resultado en vez de medir cada uno por
-        # separado, que ya no reflejaría el tiempo real percibido.
+        # Since they run in parallel, both share roughly the same
+        # wall-clock time; the same value is shown on both result cards
+        # instead of timing each one separately, which would no longer
+        # reflect the actual perceived time.
         duration1 = duration_parallel
         duration2 = duration_parallel
 
@@ -507,22 +510,22 @@ if analizar and url:
             fake_fig1 = FigBarras(results2)
             fake_fig2 = FigTarta(results2)
 
-        # Interpretación con Mistral — protegido con truncado y timeout guard robusto
+        # LLM interpretation via Groq — guarded with truncation and a robust timeout
         if results1 and results2:
             start3 = time.time()
-            # Truncado seguro del texto de entrada para evitar sobrecostes y desbordamiento de contexto de tokens
+            # Safe truncation of the input text to avoid excess cost and token-context overflow
             texto_truncado_llm = texto_completo[:MAX_TEXT_CHARS_LLM] if texto_completo else ""
-            
-            # Ejecución en un hilo independiente para evitar bloqueos infinitos de la app si la API no responde
+
+            # Run in a separate thread to avoid the app hanging indefinitely if the API doesn't respond
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(EXPLAIN, texto_truncado_llm, results1, results2)
                 try:
-                    llm_result = future.result(timeout=35)  # Cortafuegos temporal de 35 segundos máximo
+                    llm_result = future.result(timeout=35)  # 35-second hard timeout guard
                 except concurrent.futures.TimeoutError:
-                    logger.warning("La llamada a EXPLAIN superó el timeout establecido (35s).")
+                    logger.warning("The EXPLAIN call exceeded the configured timeout (35s).")
                     llm_result = None
                 except Exception as ex_llm:
-                    logger.error(f"Excepción interna en la llamada LLM: {ex_llm}")
+                    logger.error(f"Internal exception in the LLM call: {ex_llm}")
                     llm_result = None
             duration3 = time.time() - start3
         else:

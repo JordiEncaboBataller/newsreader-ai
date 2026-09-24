@@ -1,34 +1,71 @@
 # NewsReader AI
 
-Aplicación en Streamlit que analiza artículos de noticias a partir de una URL:
-detecta **sesgo político**, probabilidad de **fake news**, genera un **resumen**
-y una **interpretación en lenguaje natural** de los resultados usando modelos
-Transformer locales + la API de Mistral.
+A Streamlit application that analyzes news articles from a URL: it detects **political bias** and **fake news probability** using locally fine-tuned Transformer models, then uses an **LLM (Groq)** to generate a plain-language summary and a three-part interpretation of the results — explanation, justification, and a risk warning for the reader.
 
-## Índice
+![Python](https://img.shields.io/badge/-Python-3776AB?style=flat&logo=python&logoColor=white)
+![Streamlit](https://img.shields.io/badge/-Streamlit-FF4B4B?style=flat&logo=streamlit&logoColor=white)
+![PyTorch](https://img.shields.io/badge/-PyTorch-EE4C2C?style=flat&logo=pytorch&logoColor=white)
+![Transformers](https://img.shields.io/badge/-Transformers-FFD21E?style=flat&logo=huggingface&logoColor=black)
+![Groq](https://img.shields.io/badge/-Groq-F55036?style=flat&logoColor=white)
 
-- [Requisitos previos](#requisitos-previos)
-- [Instalación](#instalación)
-- [Variables de entorno](#variables-de-entorno)
-- [Modelos (`ModelsBias` / `ModelsFake`)](#modelos-modelsbias--modelsfake)
-- [Ejecutar la aplicación](#ejecutar-la-aplicación)
-- [Estructura del proyecto](#estructura-del-proyecto)
-- [Qué subir a GitHub y qué no](#qué-subir-a-github-y-qué-no)
-- [Limitaciones conocidas](#limitaciones-conocidas)
+![NewsReader AI — main view](assets/screenshots/main-view.png)
+
+## Table of contents
+
+- [How it works](#how-it-works)
+- [Screenshots](#screenshots)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Environment variables](#environment-variables)
+- [Models (`ModelsBias` / `ModelsFake`)](#models-modelsbias--modelsfake)
+- [Running the app](#running-the-app)
+- [Project structure](#project-structure)
+- [What's committed to Git and what isn't](#whats-committed-to-git-and-what-isnt)
+- [Known limitations](#known-limitations)
 
 ---
 
-## Requisitos previos
+## How it works
+
+Given a news article URL, the app runs the following pipeline:
+
+1. **Scraping** — fetches the article with a plain HTTP request first; if that's blocked (anti-bot protection), it falls back to a headless Chrome browser via `undetected-chromedriver`. The raw HTML is then cleaned with `trafilatura` to extract just the article body.
+2. **Summary** — the extracted text is sent to Groq to generate a short, neutral summary shown immediately while the rest of the analysis runs.
+3. **Language handling** — the article's language is detected with `langdetect`. Since the classifier models are trained on English text, non-English articles are translated via Groq before classification (only as much text as the classifiers will actually use, to save time and API cost).
+4. **Classification** — the (possibly translated) text is split into token chunks and run through two independent fine-tuned BERT-style models **in parallel**:
+   - **Political bias** — 5 classes: left, leaning-left, center, leaning-right, right
+   - **Fake news** — 2 classes: real, fake
+
+   Long articles are split into multiple chunks (up to 512 tokens each), batched into a single forward pass per model, and the resulting predictions are averaged.
+5. **LLM interpretation** — the original article text and both classifiers' results are sent to Groq, which returns a structured explanation, a justification of why the models likely reached that result, and a risk-analysis paragraph encouraging the reader to think critically about the article.
+
+Results are displayed in three tabs (Bias Detector, Fake News Detector, LLM Interpretation), each with bar/donut charts (Plotly) and the raw JSON output available on demand.
+
+## Screenshots
+
+**Political Bias Predictor**
+
+![Bias Detector tab](assets/screenshots/bias-detector.png)
+
+**Fake News Detector**
+
+![Fake News Detector tab](assets/screenshots/fake-news-detector.png)
+
+**LLM Interpretation**
+
+![LLM Interpretation tab](assets/screenshots/llm-interpretation.png)
+
+## Prerequisites
 
 - Python 3.10+
-- Google Chrome instalado (necesario para el scraping de respaldo vía Selenium/`undetected_chromedriver` cuando la petición HTTP simple falla)
-- Una API key de [Mistral AI](https://console.mistral.ai/)
+- Google Chrome installed (needed for the Selenium/`undetected-chromedriver` scraping fallback when the plain HTTP request is blocked)
+- A free [Groq](https://console.groq.com/keys) API key
 
-## Instalación
+## Installation
 
 ```bash
-git clone <url-de-tu-repo>
-cd <carpeta-del-repo>
+git clone <your-repo-url>
+cd newsreader-ai/deploy
 
 python -m venv venv
 source venv/bin/activate      # Windows: venv\Scripts\activate
@@ -36,30 +73,31 @@ source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Variables de entorno
+> The app lives inside the `deploy/` folder — run every command from there, since `app.py` resolves paths (models, assets, `.env`) relative to its own location.
 
-Copia la plantilla y rellena tus propias claves:
+## Environment variables
+
+Copy the template and fill in your own keys:
 
 ```bash
 cp env.example .env
 ```
 
 ```
-MISTRAL_API_KEY="tu_clave_de_mistral"
-NGROK_AUTH_TOKEN="tu_token_de_ngrok"   # solo si usas start.ipynb para exponer la app vía túnel
+GROQ_API_KEY="your_groq_api_key_here"
+NGROK_AUTH_TOKEN="your_ngrok_auth_token_here"   # only needed if you use start.ipynb to expose the app via a tunnel
 ```
 
-⚠️ **Nunca subas tu `.env` real a Git.** Ya está incluido en `.gitignore`.
+⚠️ **Never commit your real `.env` file.** It's already listed in `.gitignore`.
 
-## Modelos (`ModelsBias` / `ModelsFake`)
+## Models (`ModelsBias` / `ModelsFake`)
 
-Los pesos de los modelos **no están incluidos en este repositorio** (pesan
-demasiado para GitHub) — están alojados en Hugging Face Hub:
+Model weights are **not included in this repository** (too large for GitHub) — they're hosted on the Hugging Face Hub:
 
-- `ModelsBias` → https://huggingface.co/JordiEncabo/newsreader-bias
-- `ModelsFake` → https://huggingface.co/JordiEncabo/newsreader-fake
+- `ModelsBias` → [huggingface.co/JordiEncabo/newsreader-bias](https://huggingface.co/JordiEncabo/newsreader-bias)
+- `ModelsFake` → [huggingface.co/JordiEncabo/newsreader-fake](https://huggingface.co/JordiEncabo/newsreader-fake)
 
-### Descargarlos
+### Download them
 
 ```bash
 pip install huggingface_hub
@@ -68,15 +106,14 @@ huggingface-cli download JordiEncabo/newsreader-bias --local-dir ./ModelsBias
 huggingface-cli download JordiEncabo/newsreader-fake --local-dir ./ModelsFake
 ```
 
-Esto coloca los archivos directamente donde `app.py` los espera — no hace
-falta tocar el código.
+This places the files exactly where `app.py` expects them — no code changes needed.
 
-### Estructura de carpetas esperada
+### Expected folder layout
 
 ```
 ModelsBias/
 ├── config.json
-├── label_encoder.pkl          ← archivo propio del proyecto (no lo genera from_pretrained)
+├── label_encoder.pkl          ← project-specific file (not generated by from_pretrained)
 ├── model.safetensors
 ├── special_tokens_map.json
 ├── tokenizer_config.json
@@ -85,80 +122,72 @@ ModelsBias/
 
 ModelsFake/
 ├── config.json
-├── model.safetensors           ← el que usa el código (use_safetensors=True)
+├── model.safetensors           ← the one the code uses (use_safetensors=True)
 ├── special_tokens_map.json
 ├── tokenizer_config.json
 ├── tokenizer.json
 └── vocab.txt
 ```
 
-> `ModelsFake` en Hugging Face también contiene `pytorch_model.bin`: es un
-> duplicado del mismo modelo en formato antiguo que el código nunca usa. No
-> hace falta descargarlo ni afecta si lo tienes, pero puedes eliminarlo del
-> repo de Hugging Face para aligerarlo.
+> `ModelsFake` on Hugging Face also contains `pytorch_model.bin` — a duplicate of the same model in the legacy format, never used by the code. You don't need to download it, and having it doesn't cause any issues, but you can remove it from the Hugging Face repo to make it lighter.
 
-## Ejecutar la aplicación
+## Running the app
 
 ```bash
 streamlit run app.py
 ```
 
-La app se abrirá en `http://localhost:8501`.
+The app opens at `http://localhost:8501`.
 
-Alternativamente, `start.ipynb` lanza la app y la expone públicamente a través
-de un túnel de ngrok (requiere `NGROK_AUTH_TOKEN` en tu `.env`).
+Alternatively, `start.ipynb` launches the app and exposes it publicly through an ngrok tunnel (requires `NGROK_AUTH_TOKEN` in your `.env`).
 
-## Estructura del proyecto
+## Project structure
 
 ```
-newsreader-ai/                    ← raíz del repositorio (inicializa git aquí)
-├── core/                         # Paquete con la lógica de negocio
-│   ├── __init__.py
-│   ├── auto_scraper.py            # Extracción de texto del artículo (requests + Selenium de respaldo)
-│   ├── chunking_utils.py           # División y batching de texto largo en bloques de tokens
-│   ├── figuras.py                   # Gráficos Plotly (barras y tarta) de las probabilidades
-│   ├── mistral_sm.py                 # Prompts y llamadas a la API de Mistral (resumen, traducción, interpretación)
-│   ├── predictor_bias.py              # Inferencia del modelo de sesgo político
-│   └── predictor_fake.py               # Inferencia del modelo de fake news
-├── assets/
-│   └── logo_oscuro.png            # Logo usado en la cabecera de la app
-├── ModelsBias/                    ← NO se sube (ver sección Modelos)
-├── ModelsFake/                    ← NO se sube (ver sección Modelos)
-├── .env                           ← NO se sube (tus claves reales)
+newsreader-ai/                      ← repository root
+├── deploy/                         # The actual application — run everything from here
+│   ├── core/                       # Business logic package
+│   │   ├── __init__.py
+│   │   ├── auto_scraper.py          # Article text extraction (requests + Selenium fallback)
+│   │   ├── chunking_utils.py         # Splits/batches long text into token chunks for inference
+│   │   ├── figuras.py                 # Plotly bar/donut charts of the class probabilities
+│   │   ├── groq.py                     # Groq prompts and API calls (summary, translation, interpretation)
+│   │   ├── predictor_bias.py            # Political bias model inference
+│   │   └── predictor_fake.py             # Fake news model inference
+│   ├── assets/
+│   │   └── logo_oscuro.png          # Logo shown in the app header
+│   ├── ModelsBias/                  ← NOT committed (see Models section)
+│   ├── ModelsFake/                  ← NOT committed (see Models section)
+│   ├── .env                         ← NOT committed (your real keys)
+│   ├── app.py                       # Streamlit UI and pipeline orchestration
+│   ├── env.example
+│   ├── requirements.txt
+│   └── start.ipynb                  # Optional ngrok launcher
 ├── .gitignore
-├── app.py                         # Interfaz Streamlit y orquestación del pipeline
-├── env.example
 ├── LICENSE
-├── README.md
-├── requirements.txt
-└── start.ipynb                    # Lanzador opcional vía ngrok
+└── README.md
 ```
 
-## Qué subir a GitHub y qué no
+## What's committed to Git and what isn't
 
-| Elemento | ¿Se sube? | Motivo |
+| Item | Committed? | Why |
 |---|---|---|
-| `app.py` | ✅ Sí | Punto de entrada de la app |
-| `core/` (los 6 módulos + `__init__.py`) | ✅ Sí | Código fuente de la lógica de negocio |
-| `requirements.txt` | ✅ Sí | Necesario para instalar dependencias |
-| `env.example` | ✅ Sí | Plantilla sin claves reales |
-| `.gitignore` | ✅ Sí | Necesario para que el resto de reglas funcionen |
-| `README.md` | ✅ Sí | Documentación |
-| `LICENSE` | ✅ Sí | Licencia del proyecto |
-| `assets/logo_oscuro.png` | ✅ Sí | Pesa poco, y `app.py` lo necesita para arrancar (falla con `FileNotFoundError` si no está) |
-| `start.ipynb` | ✅ Sí (opcional) | Solo si quieres mantener el lanzador por ngrok |
-| `.env` | ❌ No | Contiene tus claves reales — ya está en `.gitignore` |
-| `ModelsBias/`, `ModelsFake/` | ❌ No | Demasiado grandes para GitHub — alojados en Hugging Face, ya en `.gitignore` |
-| `__pycache__/`, `.ipynb_checkpoints/` | ❌ No | Archivos generados automáticamente por Python/Jupyter |
-| `__MACOSX/` | ❌ No | Artefacto de descomprimir un `.zip` en macOS, ajeno al proyecto — bórralo, ni siquiera hace falta que esté en el `.gitignore` si lo borras a mano |
+| `deploy/app.py` | ✅ Yes | App entry point |
+| `deploy/core/` (all modules + `__init__.py`) | ✅ Yes | Business logic source code |
+| `deploy/requirements.txt` | ✅ Yes | Needed to install dependencies |
+| `deploy/env.example` | ✅ Yes | Template with no real keys |
+| `deploy/assets/logo_oscuro.png` | ✅ Yes | Small file, and `app.py` needs it to start (raises `FileNotFoundError` otherwise) |
+| `assets/screenshots/` | ✅ Yes | Used by `README.md` — small enough to commit |
+| `deploy/start.ipynb` | ✅ Yes (optional) | Only if you want to keep the ngrok launcher |
+| `.gitignore` | ✅ Yes | Needed for the rest of these rules to work |
+| `README.md` | ✅ Yes | Documentation |
+| `LICENSE` | ✅ Yes | Project license |
+| `deploy/.env` | ❌ No | Contains your real keys — already in `.gitignore` |
+| `deploy/ModelsBias/`, `deploy/ModelsFake/` | ❌ No | Too large for GitHub — hosted on Hugging Face, already in `.gitignore` |
+| `__pycache__/`, `.ipynb_checkpoints/` | ❌ No | Auto-generated by Python/Jupyter |
 
-## Limitaciones conocidas
+## Known limitations
 
-- El scraping de respaldo usa Chrome headless vía `undetected_chromedriver`.
-  Si despliegas esta app en un servidor/PaaS que no tenga Chrome instalado
-  (por ejemplo, Streamlit Community Cloud sin configuración adicional), ese
-  respaldo fallará silenciosamente y solo funcionará el método de `requests`
-  simple.
-- Los modelos se cargan y ejecutan en CPU por defecto. Si tu servidor tiene
-  GPU disponible, hay margen de mejora de rendimiento moviendo los modelos a
-  `cuda`.
+- The scraping fallback uses headless Chrome via `undetected-chromedriver`. If you deploy this app on a server/PaaS without Chrome installed (e.g. Streamlit Community Cloud without extra configuration), that fallback will fail silently and only the plain `requests` method will work.
+- Models run on CPU by default. If your server has a GPU available, there's room to improve performance by moving the models to `cuda`.
+- Groq's free tier applies rate limits (requests/minute and/or per day); the app retries automatically on a 429, but very heavy usage may still hit the daily cap.

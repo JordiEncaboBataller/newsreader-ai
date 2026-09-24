@@ -1,3 +1,16 @@
+"""LLM-powered features for NewsReader AI: interpreting the classifier
+results in plain language, summarizing articles, and translating
+non-English articles before classification.
+
+Uses the Groq API (OpenAI-compatible chat completions). Previously used
+the Mistral API — migrated because Mistral's free tier turned out to be
+too restrictive in practice (403 tier_not_allowed on larger models,
+persistent 429s even on small models after only a few requests). Groq
+offers a free tier with no credit card required and much more generous
+limits (30 requests/min, 1,000/day on this model), with an API that's
+compatible with the same code pattern used before.
+"""
+
 import os
 import json
 import re
@@ -10,30 +23,25 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Migrado de Mistral a Groq: el tier gratuito de Mistral resultó ser
-# demasiado restrictivo en la práctica (403 tier_not_allowed en modelos
-# grandes, 429 persistente incluso en modelos pequeños tras pocas
-# peticiones). Groq ofrece un tier gratuito sin tarjeta de crédito con
-# límites mucho más generosos (30 peticiones/min, 1.000/día con este
-# modelo) y una API compatible con el mismo patrón de código.
 MODEL_NAME = 'openai/gpt-oss-120b'
 
-# Reintentos ante un 429 (límite de peticiones agotado). Un 429 aislado no
-# significa que la petición sea inválida, solo que hay que esperar un poco
-# antes de volver a intentarlo.
+# Retries on a 429 (rate limit exceeded). A single 429 doesn't mean the
+# request is invalid, just that we need to wait a bit before retrying.
 MAX_RETRIES = 3
 RETRY_BASE_DELAY_SECONDS = 4
 
 
 def _is_rate_limit_error(e):
-    """Detecta si la excepción corresponde a un 429 / rate_limited de la API,
-    inspeccionando el mensaje de error (la SDK no siempre expone un
-    atributo status_code fiable en todas las versiones)."""
+    """Detects whether the exception corresponds to a 429 / rate_limited
+    API error, by inspecting the error message (the SDK doesn't always
+    expose a reliable status_code attribute across all versions)."""
     text = str(e)
     return "429" in text or "rate_limited" in text or "Rate limit" in text
 
 
 def _get_client():
+    """Builds a Groq client using the API key from the environment.
+    Raises a clear error if GROQ_API_KEY is missing from .env."""
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise ValueError("GROQ_API_KEY not found. Check your .env file.")
@@ -41,6 +49,9 @@ def _get_client():
 
 
 def prompt_1(text, result1, result2):
+    """Builds the prompt asking the LLM to explain, in three parts
+    (interpretation, justification, risk analysis), the bias/fake-news
+    classifier results for a general audience."""
     user_prompt = f"""
     You will analyze the following news article and explain its potential reliability and political bias for general readers.
 
@@ -82,6 +93,8 @@ def prompt_1(text, result1, result2):
 
 
 def prompt_2(text):
+    """Builds the prompt asking the LLM for a short, neutral summary of
+    the article."""
     summary_prompt = f"""
     You will read the following news article and write a clear and concise summary of its main points.
 
@@ -99,6 +112,9 @@ def prompt_2(text):
 
 
 def prompt_3(text):
+    """Builds the prompt asking the LLM to translate the article to
+    English, used before classification when the source language isn't
+    English."""
     translate_prompt = f"""
     Translate the following news article to English.
 
@@ -113,10 +129,10 @@ def prompt_3(text):
     return translate_prompt
 
 
-def call_mistral_json(prompt, role):
+def call_groq_json(prompt, role):
     """Calls the LLM (Groq) and returns a parsed Python dict (JSON mode).
-    Reintenta automáticamente si la API responde con un 429 (rate limit del
-    tier gratuito), esperando un poco más en cada intento."""
+    Automatically retries if the API responds with a 429 (free-tier rate
+    limit), waiting a bit longer on each attempt."""
     client = _get_client()
 
     last_error = None
@@ -129,8 +145,8 @@ def call_mistral_json(prompt, role):
                     {"role": "user", "content": prompt}
                 ],
                 response_format={"type": "json_object"},
-                # temperature=0 minimiza (aunque no garantiza al 100%) la
-                # variabilidad de la respuesta entre llamadas idénticas.
+                # temperature=0 minimizes (though doesn't 100% guarantee)
+                # response variability between identical calls.
                 temperature=0
             )
             raw = response.choices[0].message.content
@@ -141,16 +157,16 @@ def call_mistral_json(prompt, role):
             last_error = e
             if _is_rate_limit_error(e) and attempt < MAX_RETRIES:
                 wait = RETRY_BASE_DELAY_SECONDS * attempt
-                logger.warning(f"Rate limit alcanzado (intento {attempt}/{MAX_RETRIES}), reintentando en {wait}s...")
+                logger.warning(f"Rate limit hit (attempt {attempt}/{MAX_RETRIES}), retrying in {wait}s...")
                 time.sleep(wait)
                 continue
             raise last_error
 
 
-def call_mistral_text(prompt, role):
-    """Calls the LLM (Groq) and returns plain text.
-    Reintenta automáticamente si la API responde con un 429 (rate limit del
-    tier gratuito), esperando un poco más en cada intento."""
+def call_groq_text(prompt, role):
+    """Calls the LLM (Groq) and returns plain text. Automatically retries
+    if the API responds with a 429 (free-tier rate limit), waiting a bit
+    longer on each attempt."""
     client = _get_client()
 
     last_error = None
@@ -162,8 +178,8 @@ def call_mistral_text(prompt, role):
                     {"role": "system", "content": role},
                     {"role": "user", "content": prompt}
                 ],
-                # temperature=0 minimiza (aunque no garantiza al 100%) la
-                # variabilidad de la respuesta entre llamadas idénticas.
+                # temperature=0 minimizes (though doesn't 100% guarantee)
+                # response variability between identical calls.
                 temperature=0
             )
             return response.choices[0].message.content
@@ -171,7 +187,7 @@ def call_mistral_text(prompt, role):
             last_error = e
             if _is_rate_limit_error(e) and attempt < MAX_RETRIES:
                 wait = RETRY_BASE_DELAY_SECONDS * attempt
-                logger.warning(f"Rate limit alcanzado (intento {attempt}/{MAX_RETRIES}), reintentando en {wait}s...")
+                logger.warning(f"Rate limit hit (attempt {attempt}/{MAX_RETRIES}), retrying in {wait}s...")
                 time.sleep(wait)
                 continue
             raise last_error
@@ -183,28 +199,28 @@ def EXPLAIN(text, result1, result2):
     prompt = prompt_1(text, result1, result2)
     role = "You are a helpful assistant that analyzes news articles to explain their reliability and bias to the general public. You always respond with valid JSON."
     try:
-        return call_mistral_json(prompt, role)
+        return call_groq_json(prompt, role)
     except Exception as e:
         logger.error(f"EXPLAIN error: {e}")
         return None
 
 
 def _strip_leading_heading(text):
-    """Elimina un posible encabezado inicial tipo '**Summary:**', 'Summary:'
-    o 'Resumen:' que el modelo a veces añade pese a que se le pide que no
-    lo haga. Se aplica como red de seguridad adicional, ya que el prompt
-    por sí solo no garantiza al 100% que el modelo lo omita.
+    """Removes a possible leading heading such as '**Summary:**',
+    'Summary:' or 'Resumen:' that the model sometimes adds despite being
+    asked not to. Applied as an extra safety net, since the prompt alone
+    doesn't 100% guarantee the model will omit it.
     """
     if not text:
         return text
 
     cleaned = text.strip()
-    # Coincide con variantes como:
+    # Matches variants like:
     #   **Summary:**
     #   Summary:
     #   ### Summary
     #   Resumen:
-    # al principio del texto, seguidas de saltos de línea/espacios.
+    # at the start of the text, followed by line breaks/whitespace.
     cleaned = re.sub(
         r'^\s*(#{1,3}\s*)?\**\s*(summary|resumen)\s*:?\**\s*\n*',
         '',
@@ -219,7 +235,7 @@ def SUMMARY(text):
     prompt = prompt_2(text)
     role = "You are a helpful assistant that summarizes news articles clearly and concisely for a general audience."
     try:
-        raw_summary = call_mistral_text(prompt, role)
+        raw_summary = call_groq_text(prompt, role)
         return _strip_leading_heading(raw_summary)
     except Exception as e:
         logger.error(f"SUMMARY error: {e}")
@@ -232,7 +248,7 @@ def TRANSLATE(text):
     prompt = prompt_3(text)
     role = "You are a professional translator that produces accurate, complete English translations of news articles."
     try:
-        return call_mistral_text(prompt, role)
+        return call_groq_text(prompt, role)
     except Exception as e:
         logger.error(f"TRANSLATE error: {e}")
         return None
